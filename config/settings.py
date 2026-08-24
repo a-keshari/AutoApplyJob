@@ -101,6 +101,7 @@ class UserProfile(BaseModel):
 class SearchCriteria(BaseModel):
     job_titles: list[str]
     locations: list[str]
+    search_urls: list[str] = []
     remote_only: bool = False
     salary_min: int | None = None
     keywords_include: list[str] = []

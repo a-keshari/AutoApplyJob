@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import TYPE_CHECKING, Iterator
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from bot.search.base import BaseSearcher, RawJob
 
@@ -26,6 +26,9 @@ class LinkedInSearcher(BaseSearcher):
     def search(self, criteria: SearchCriteria, page=None) -> Iterator[RawJob]:
         """Search LinkedIn for jobs matching criteria.
 
+        Exact LinkedIn search URLs take precedence when configured. Otherwise
+        the existing title/location URL generation is used unchanged.
+
         Args:
             criteria: Search parameters.
             page: Playwright Page instance.
@@ -39,6 +42,19 @@ class LinkedInSearcher(BaseSearcher):
 
         max_results = getattr(criteria, "max_results_per_search", 100)
         found = 0
+        custom_urls = self._custom_search_urls(criteria)
+
+        if custom_urls:
+            for url in custom_urls:
+                if found >= max_results:
+                    return
+                try:
+                    for raw_job in self._search_url(page, url, max_results - found):
+                        found += 1
+                        yield raw_job
+                except Exception as e:
+                    logger.error("LinkedIn exact-URL search failed for '%s': %s", url, e)
+            return
 
         for title in criteria.job_titles:
             for location in criteria.locations:
@@ -55,6 +71,19 @@ class LinkedInSearcher(BaseSearcher):
                         title, location, e,
                     )
 
+    @staticmethod
+    def _custom_search_urls(criteria) -> list[str]:
+        urls: list[str] = []
+        for value in getattr(criteria, "search_urls", []) or []:
+            url = str(value).strip()
+            if not url:
+                continue
+            parsed = urlparse(url)
+            host = parsed.netloc.lower().split(":", 1)[0]
+            if host in {"linkedin.com", "www.linkedin.com"} and parsed.path.startswith("/jobs"):
+                urls.append(url)
+        return urls
+
     def _search_page(
         self, page, title: str, location: str, criteria, remaining: int
     ) -> Iterator[RawJob]:
@@ -68,6 +97,11 @@ class LinkedInSearcher(BaseSearcher):
             url += "&f_WT=2"  # LinkedIn remote filter
 
         logger.info("LinkedIn: searching '%s' in '%s'", title, location)
+        yield from self._search_url(page, url, remaining)
+
+    def _search_url(self, page, url: str, remaining: int) -> Iterator[RawJob]:
+        """Search and paginate from an exact LinkedIn search URL without modifying it."""
+        logger.info("LinkedIn: opening search URL %s", url)
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(2)  # Wait for dynamic content
 
