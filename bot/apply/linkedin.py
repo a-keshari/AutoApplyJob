@@ -6,14 +6,21 @@ Implements: FR-047 (LinkedIn Easy Apply).
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from bot.apply.base import ApplyResult, BaseApplier
+from bot.apply.linkedin_controls import collect_visible_questions, fill_screening_answers
 
 logger = logging.getLogger(__name__)
 
 
 class LinkedInApplier(BaseApplier):
     """Automate LinkedIn Easy Apply submissions."""
+
+    def __init__(self, page) -> None:
+        super().__init__(page)
+        self._llm_config: Any = None
+        self._llm_config_loaded = False
 
     def _do_apply(
         self, job, resume_pdf_path, cover_letter_text, profile
@@ -63,6 +70,7 @@ class LinkedInApplier(BaseApplier):
                 ])
 
             self._fill_cover_letter(cover_letter_text)
+            self._answer_visible_questions(job, profile)
 
             # Check for submit button (final step)
             if self._safe_click(
@@ -95,6 +103,50 @@ class LinkedInApplier(BaseApplier):
             success=False,
             error_message="Could not complete Easy Apply — ran out of steps",
         )
+
+    def _resolve_llm_config(self):
+        if self._llm_config_loaded:
+            return self._llm_config
+        self._llm_config_loaded = True
+        try:
+            from config.settings import load_config
+
+            config = load_config()
+            self._llm_config = config.llm if config else None
+        except Exception as exc:
+            logger.warning("LinkedIn: could not load AI configuration: %s", exc)
+        return self._llm_config
+
+    def _collect_visible_questions(self) -> list[dict]:
+        return collect_visible_questions(self.page)
+
+    def _fill_screening_answers(self, answers: list[dict]) -> None:
+        fill_screening_answers(self.page, answers, self._random_pause)
+
+    def _answer_visible_questions(self, job, profile) -> None:
+        """Batch visible unanswered controls through the LLM, with a local fallback."""
+        from core.linkedin_screening import answer_screening_questions, saved_answer_fallback
+
+        for _ in range(2):
+            questions = self._collect_visible_questions()
+            if not questions:
+                return
+
+            answers = []
+            llm_config = self._resolve_llm_config()
+            if llm_config and getattr(llm_config, "api_key", ""):
+                try:
+                    answers = answer_screening_questions(job, profile, questions, llm_config)
+                except Exception as exc:
+                    logger.warning(
+                        "LinkedIn: LLM screening answers failed; using saved-answer fallback: %s",
+                        exc,
+                    )
+
+            if not answers:
+                answers = saved_answer_fallback(profile, questions)
+
+            self._fill_screening_answers(answers)
 
     def _fill_form_fields(self, profile) -> None:
         """Fill common form fields if they are empty."""
