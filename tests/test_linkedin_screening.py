@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from bot.apply.linkedin import LinkedInApplier
+from bot.apply.linkedin_controls import collect_visible_questions, fill_screening_answers
 from core.linkedin_screening import (
     build_screening_prompt,
     parse_screening_answers,
@@ -119,6 +120,49 @@ def test_applier_collects_questions_with_dom_script():
     page.evaluate.return_value = expected
     applier = LinkedInApplier(page)
     assert applier._collect_visible_questions() == expected
+
+
+def test_collect_enriches_dynamic_combobox_options():
+    page = MagicMock()
+    questions = [{"id": "q1", "type": "combobox", "question": "State", "options": []}]
+    page.evaluate.return_value = questions
+
+    combo = MagicMock()
+    combo.is_visible.return_value = True
+    page.query_selector.return_value = combo
+
+    option = MagicMock()
+    option.is_visible.return_value = True
+    option.inner_text.return_value = "Texas"
+    option.get_attribute.return_value = "TX"
+    page.query_selector_all.return_value = [option]
+
+    result = collect_visible_questions(page)
+
+    assert result[0]["options"] == [{"label": "Texas", "value": "TX"}]
+    combo.click.assert_called_once()
+    page.keyboard.press.assert_called_once_with("Escape")
+
+
+def test_fill_selects_dynamic_custom_combobox_option():
+    page = MagicMock()
+    page.evaluate.return_value = [{"id": "q1", "filled": False, "type": "combobox"}]
+
+    combo = MagicMock()
+    combo.is_visible.return_value = True
+    page.query_selector.return_value = combo
+
+    option = MagicMock()
+    option.is_visible.return_value = True
+    option.inner_text.return_value = "Texas"
+    option.get_attribute.return_value = "TX"
+    page.query_selector_all.return_value = [option]
+    pause = MagicMock()
+
+    fill_screening_answers(page, [{"id": "q1", "answer": "Texas"}], pause)
+
+    combo.click.assert_called_once()
+    option.click.assert_called_once()
 
 
 @patch("bot.apply.base.time.sleep")
