@@ -138,6 +138,60 @@ def _strip_json(text: str) -> str:
     return cleaned[start : end + 1]
 
 
+def _normalize(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def _neutral_option(question: dict) -> str:
+    preferences = (
+        "prefer not to answer",
+        "prefer not to say",
+        "decline to answer",
+        "decline to self identify",
+        "do not wish to answer",
+        "not applicable",
+        "n a",
+        "other",
+    )
+    options = question.get("options") or []
+    for preference in preferences:
+        for option in options:
+            label = str(option.get("label", ""))
+            value = str(option.get("value", ""))
+            if preference in _normalize(label) or preference in _normalize(value):
+                return label or value
+    return ""
+
+
+def _normalize_answer(question: dict, answer: Any) -> Any:
+    """Apply deterministic guardrails after the LLM response."""
+    qtype = str(question.get("type", ""))
+    qtext = _normalize(question.get("question", ""))
+
+    if qtype == "number" and isinstance(answer, (str, int, float)):
+        text = str(answer).strip()
+        match = re.fullmatch(r"-?\d+(?:\.\d+)?", text)
+        if match and "year" in qtext and "experience" in qtext:
+            value = float(text)
+            if value > 9:
+                return "9"
+
+    if answer in (None, "", []):
+        if qtype in {"select", "radio", "combobox"}:
+            return _neutral_option(question)
+        return [] if qtype == "checkbox" else ""
+
+    if qtype in {"select", "radio", "combobox"}:
+        target = _normalize(answer[0] if isinstance(answer, list) and answer else answer)
+        for option in question.get("options") or []:
+            label = str(option.get("label", ""))
+            value = str(option.get("value", ""))
+            if target in {_normalize(label), _normalize(value)}:
+                return label or value
+
+    return answer
+
+
 def parse_screening_answers(raw: str, questions: list[dict]) -> list[dict]:
     """Validate LLM JSON and normalize it to the supplied question ids."""
     payload = json.loads(_strip_json(raw))
@@ -156,11 +210,13 @@ def parse_screening_answers(raw: str, questions: list[dict]) -> list[dict]:
             if isinstance(answer, (str, int, float, bool, list)):
                 by_id[qid] = answer
 
-    return [{"id": qid, "answer": by_id.get(qid, "")} for qid in allowed]
-
-
-def _normalize(text: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+    return [
+        {
+            "id": str(question.get("id", "")),
+            "answer": _normalize_answer(question, by_id.get(str(question.get("id", "")), "")),
+        }
+        for question in questions
+    ]
 
 
 def saved_answer_fallback(profile, questions: list[dict]) -> list[dict]:
@@ -181,7 +237,9 @@ def saved_answer_fallback(profile, questions: list[dict]) -> list[dict]:
         "linkedin": getattr(profile, "linkedin_url", "") or "",
         "portfolio": getattr(profile, "portfolio_url", "") or "",
     }
-    normalized = [(_normalize(key), value) for key, value in candidates.items() if value not in (None, "")]
+    normalized = [
+        (_normalize(key), value) for key, value in candidates.items() if value not in (None, "")
+    ]
 
     answers: list[dict] = []
     for question in questions:
@@ -192,7 +250,7 @@ def saved_answer_fallback(profile, questions: list[dict]) -> list[dict]:
             if key and (key in qtext or qtext in key):
                 answer = value
                 break
-        answers.append({"id": qid, "answer": answer})
+        answers.append({"id": qid, "answer": _normalize_answer(question, answer)})
     return answers
 
 
