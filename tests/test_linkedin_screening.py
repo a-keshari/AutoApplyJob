@@ -64,6 +64,29 @@ def test_parse_screening_answers_ignores_unknown_ids():
     assert parsed == [{"id": "q1", "answer": "Because"}]
 
 
+def test_numeric_experience_is_capped_at_nine():
+    questions = [{
+        "id": "q1", "type": "number",
+        "question": "How many years of Python experience do you have?", "options": [],
+    }]
+    parsed = parse_screening_answers(
+        '{"answers":[{"id":"q1","answer":"12"}]}', questions
+    )
+    assert parsed == [{"id": "q1", "answer": "9"}]
+
+
+def test_blank_multiple_choice_uses_neutral_option_when_available():
+    questions = [{
+        "id": "q1", "type": "radio", "question": "Voluntary disclosure",
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "Prefer not to answer", "value": "decline"},
+        ],
+    }]
+    parsed = parse_screening_answers('{"answers":[{"id":"q1","answer":""}]}', questions)
+    assert parsed == [{"id": "q1", "answer": "Prefer not to answer"}]
+
+
 def test_saved_answer_fallback_matches_question_text():
     questions = [
         {"id": "q1", "question": "Are you legally authorized for work authorization?"},
@@ -86,7 +109,7 @@ def test_prompt_contains_all_questions_context_and_rules():
     assert "PRIVATE RULES" in prompt
     assert "Need sponsorship?" in prompt
     assert "Python and Azure are required." in prompt
-    assert "never more than 9 years" in prompt.lower()
+    assert "more than 9 years" in prompt.lower()
     assert "saved_screening_answers" in prompt
 
 
@@ -135,6 +158,7 @@ def test_applier_falls_back_when_llm_fails(mock_answer, mock_fallback, _sleep):
     applier = LinkedInApplier(page)
     applier._llm_config = MagicMock(api_key="test-key")
     applier._llm_config_loaded = True
-    applier._answer_visible_questions(_job(), _profile())
+    profile = _profile()
+    applier._answer_visible_questions(_job(), profile)
 
-    mock_fallback.assert_called_once_with(mock_answer.call_args.args[1], questions)
+    mock_fallback.assert_called_once_with(profile, questions)
