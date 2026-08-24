@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def get_master_docx_path(config) -> Path | None:
@@ -17,20 +21,24 @@ def get_master_docx_path(config) -> Path | None:
     return path
 
 
+def _bundled_instruction_path() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "templates" / "master_resume_instructions.md"
+    return Path(__file__).resolve().parents[1] / "templates" / "master_resume_instructions.md"
+
+
 def _load_resume_instructions(profile_dir: Path) -> str:
     candidates = (
         profile_dir / "resume_instructions.md",
         profile_dir / "MASTER RESUME EDIT PROMPT.md",
+        _bundled_instruction_path(),
     )
     for path in candidates:
         if path.exists():
             text = path.read_text(encoding="utf-8").strip()
             if text:
                 return text
-    raise RuntimeError(
-        "Master DOCX mode requires ~/.autoapply/profile/resume_instructions.md "
-        "containing the resume-edit instructions."
-    )
+    raise RuntimeError("Master DOCX resume instructions are unavailable")
 
 
 def _safe_file_part(text: str) -> str:
@@ -64,6 +72,37 @@ def _generate_cover_letter(scored, config, profile_dir: Path) -> tuple[Path | No
     return path, text
 
 
+def _cover_letter_with_fallback(scored, config, profile_dir: Path) -> tuple[Path | None, str]:
+    try:
+        return _generate_cover_letter(scored, config, profile_dir)
+    except Exception as exc:
+        logger.warning("Cover letter generation failed; continuing without AI cover letter: %s", exc)
+        text = config.bot.cover_letter_template or "" if config.bot.cover_letter_enabled else ""
+        return None, text
+
+
+def master_resume_fallback(config, profile_dir: Path) -> Path | None:
+    """Return the strongest available master-resume fallback without blocking an application."""
+    master_path = get_master_docx_path(config)
+    if master_path is None:
+        return None
+
+    from core.docx_resume_engine import convert_docx_to_pdf
+
+    output_dir = profile_dir / "resumes"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / "Master-Resume-Fallback.pdf"
+    try:
+        convert_docx_to_pdf(master_path, pdf_path)
+        return pdf_path
+    except Exception as exc:
+        logger.warning(
+            "Master resume PDF conversion failed; using original DOCX for application: %s",
+            exc,
+        )
+        return master_path
+
+
 def generate_master_documents(scored, config, profile_dir: Path):
     """Generate the validated DOCX/PDF resume and optional cover letter."""
     from core.docx_resume_engine import generate_docx_resume
@@ -82,7 +121,7 @@ def generate_master_documents(scored, config, profile_dir: Path):
         applicant_name=config.profile.full_name,
         llm_config=config.llm,
     )
-    cl_path, cover_letter_text = _generate_cover_letter(scored, config, profile_dir)
+    cl_path, cover_letter_text = _cover_letter_with_fallback(scored, config, profile_dir)
 
     version_meta = {
         "resume_md_path": "",
