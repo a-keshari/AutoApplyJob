@@ -364,13 +364,12 @@ def _wait_for_review(state: "BotState") -> tuple[str, str | None]:
 
 
 def _generate_docs(scored: ScoredJob, config, profile_dir: Path, db=None):
-    """Generate resume and cover letter, KB-first with LLM fallback.
-
-    Pipeline (TASK-030 M4):
-      1. Try KB assembly (0 API calls) if resume reuse enabled + KB populated
-      2. Fall through to LLM generation if KB assembly returns None
-      3. After LLM generation, ingest new entries into KB for future reuse
-    """
+    """Generate application documents, preferring the configured master DOCX."""
+    from bot.master_docx import (
+        generate_master_documents,
+        get_master_docx_path,
+        master_resume_fallback,
+    )
     from core.ai_engine import generate_documents
 
     resume_path = None
@@ -380,7 +379,30 @@ def _generate_docs(scored: ScoredJob, config, profile_dir: Path, db=None):
 
     skip_cover_letter = not config.bot.cover_letter_enabled
 
-    # --- Phase 1: Try KB assembly (LLM-powered with strict KB data) ---
+    # A configured DOCX is authoritative: edit the master resume for this job.
+    # If generation/validation fails, keep applying with the master resume itself.
+    if get_master_docx_path(config) is not None:
+        try:
+            return generate_master_documents(scored, config, profile_dir)
+        except Exception as e:
+            logger.warning(
+                "Master DOCX generation failed; applying with master resume fallback: %s",
+                e,
+            )
+            resume_path = master_resume_fallback(config, profile_dir)
+            if not skip_cover_letter:
+                cover_letter_text = config.bot.cover_letter_template or ""
+            version_meta = {
+                "resume_md_path": "",
+                "resume_pdf_path": str(resume_path) if resume_path else "",
+                "llm_provider": None,
+                "llm_model": None,
+                "reuse_source": "master_docx_fallback",
+                "source_entry_ids": [],
+            }
+            return resume_path, cl_path, cover_letter_text, version_meta
+
+    # Existing behavior for users without a master DOCX remains unchanged.
     kb_result = _try_kb_assembly(scored, config, profile_dir)
     if kb_result is not None:
         resume_path = kb_result["resume_path"]
@@ -397,7 +419,6 @@ def _generate_docs(scored: ScoredJob, config, profile_dir: Path, db=None):
         logger.info("KB assembly produced resume for %s at %s", scored.raw.company, scored.raw.title)
         return resume_path, cl_path, cover_letter_text, version_meta
 
-    # --- Phase 2: LLM generation (standard path) ---
     try:
         resume_path, cl_path, version_meta = generate_documents(
             job=scored,
@@ -411,17 +432,14 @@ def _generate_docs(scored: ScoredJob, config, profile_dir: Path, db=None):
         if cl_path and cl_path.exists():
             cover_letter_text = cl_path.read_text(encoding="utf-8")
 
-        # Tag as LLM-generated for version tracking
         if version_meta:
             version_meta["reuse_source"] = "llm_generated"
             version_meta["source_entry_ids"] = []
 
-        # --- Phase 3: Ingest LLM output into KB for future reuse ---
         _ingest_llm_output(resume_path, config, db)
 
     except Exception as e:
         logger.warning("Document generation failed, using fallback: %s", e)
-        # Fallback to static templates
         if config.profile.fallback_resume_path:
             fallback = Path(config.profile.fallback_resume_path)
             if fallback.exists():
