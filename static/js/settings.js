@@ -26,6 +26,31 @@ const LOCALE_NAMES = {
   ko: '한국어',
 };
 
+function _ensureExactSearchUrlsField() {
+  if (document.getElementById('set-search-urls')) return;
+  const locations = document.getElementById('set-locations-tags');
+  const locationsGroup = locations?.closest('.form-group');
+  if (!locationsGroup) return;
+
+  const group = document.createElement('div');
+  group.className = 'form-group';
+  group.innerHTML = `
+    <label for="set-search-urls">Exact Search URLs (optional)</label>
+    <textarea class="form-control" id="set-search-urls" rows="4"
+      placeholder="Paste one complete LinkedIn or Indeed jobs search URL per line"></textarea>
+    <div class="form-hint">
+      When URLs are provided for a platform, AutoApply opens them exactly as entered instead of generating title/location search URLs for that platform.
+    </div>`;
+  locationsGroup.insertAdjacentElement('afterend', group);
+}
+
+function _parseSearchUrls(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map(url => url.trim())
+    .filter(Boolean);
+}
+
 export async function loadSettings() {
   try {
     const res = await fetch('/api/config');
@@ -68,8 +93,11 @@ export async function loadSettings() {
     document.getElementById('set-llm-api-key').value  = llm.api_key || '';
     onLLMProviderChange();
 
+    _ensureExactSearchUrlsField();
     setTags('set-titles-tags',    pr.job_titles || []);
     setTags('set-locations-tags', pr.locations || []);
+    const searchUrls = document.getElementById('set-search-urls');
+    if (searchUrls) searchUrls.value = (pr.search_urls || []).join('\n');
     document.getElementById('set-remote').checked = !!pr.remote_only;
     document.getElementById('set-salary').value   = pr.salary_min || '';
     setTags('set-include-tags', pr.keywords_include || []);
@@ -144,6 +172,7 @@ function _collectScreeningAnswers() {
 }
 
 export async function saveSettings() {
+  _ensureExactSearchUrlsField();
   const config = {
     profile: {
       first_name:         document.getElementById('set-first-name').value,
@@ -170,6 +199,7 @@ export async function saveSettings() {
     search_criteria: {
       job_titles:        state.tagInputs['set-titles-tags'] || [],
       locations:         state.tagInputs['set-locations-tags'] || [],
+      search_urls:       _parseSearchUrls(document.getElementById('set-search-urls')?.value),
       remote_only:       document.getElementById('set-remote').checked,
       salary_min:        parseInt(document.getElementById('set-salary').value) || null,
       keywords_include:  state.tagInputs['set-include-tags'] || [],
