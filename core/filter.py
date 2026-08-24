@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from bot.search.base import RawJob
@@ -60,6 +61,23 @@ def detect_ats(url: str) -> str | None:
     return None
 
 
+def _uses_exact_search_url(criteria, platform: str) -> bool:
+    """Return True when this platform is driven by a configured exact search URL."""
+    for value in getattr(criteria, "search_urls", []) or []:
+        url = str(value).strip()
+        if not url:
+            continue
+        parsed = urlparse(url)
+        host = parsed.netloc.lower().split(":", 1)[0]
+        if platform == "linkedin":
+            if host in {"linkedin.com", "www.linkedin.com"} and parsed.path.startswith("/jobs"):
+                return True
+        elif platform == "indeed":
+            if (host == "indeed.com" or host.endswith(".indeed.com")) and parsed.path.startswith("/jobs"):
+                return True
+    return False
+
+
 def score_job(
     raw_job: "RawJob",
     config: "AppConfig",
@@ -78,6 +96,10 @@ def score_job(
       - Company in blacklist
       - Job already in database (deduplication)
 
+    When a valid exact search URL is configured for the job's platform,
+    that URL is treated as the user's shortlist: matching/scoring filters are
+    bypassed, but duplicate protection is still enforced.
+
     Args:
         raw_job: The unscored job listing.
         config: Application configuration with search criteria.
@@ -95,11 +117,18 @@ def score_job(
 
     # --- Hard disqualifiers ---
 
-    # Deduplication
+    # Deduplication always applies, including exact-URL mode.
     if db is not None and db.exists(raw_job.external_id, raw_job.platform):
         return ScoredJob(
             id=job_id, raw=raw_job, score=0,
             pass_filter=False, skip_reason="Already applied",
+        )
+
+    # An exact platform search URL is already the user's shortlist.
+    if _uses_exact_search_url(criteria, raw_job.platform):
+        return ScoredJob(
+            id=job_id, raw=raw_job, score=100,
+            pass_filter=True, skip_reason=None,
         )
 
     # Blacklisted company
