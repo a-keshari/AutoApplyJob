@@ -225,18 +225,59 @@ _FILL_ANSWERS_JS = r"""
 """
 
 
+def _normalized(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _visible_options(page) -> list:
+    options = page.query_selector_all('[role="option"]')
+    return [option for option in options if option.is_visible()]
+
+
+def _enrich_combobox_options(page, questions: list[dict]) -> None:
+    """Open dynamic ARIA comboboxes so the LLM sees the actual option labels."""
+    for question in questions:
+        if question.get("type") != "combobox" or question.get("options"):
+            continue
+        qid = str(question.get("id", ""))
+        if not qid:
+            continue
+        try:
+            combo = page.query_selector(
+                f'[data-autoapply-qid="{qid}"][data-autoapply-qtype="combobox"]'
+            )
+            if not combo or not combo.is_visible():
+                continue
+            combo.click()
+            page.wait_for_timeout(200)
+            options = _visible_options(page)
+            question["options"] = [
+                {
+                    "label": option.inner_text().strip(),
+                    "value": (option.get_attribute("data-value") or option.inner_text()).strip(),
+                }
+                for option in options
+                if option.inner_text().strip()
+            ]
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                combo.press("Escape")
+        except Exception as exc:
+            logger.debug("LinkedIn: could not inspect combobox options for %s: %s", qid, exc)
+
+
 def collect_visible_questions(page) -> list[dict]:
     """Return visible unanswered Easy Apply controls with labels and options."""
     try:
         questions = page.evaluate(_COLLECT_QUESTIONS_JS)
-        return questions if isinstance(questions, list) else []
+        if not isinstance(questions, list):
+            return []
+        _enrich_combobox_options(page, questions)
+        return questions
     except Exception as exc:
         logger.debug("LinkedIn: question collection failed: %s", exc)
         return []
-
-
-def _normalized(value: Any) -> str:
-    return " ".join(str(value or "").lower().split())
 
 
 def _fill_custom_comboboxes(page, answers: list[dict], results: list[dict], pause: Callable) -> None:
@@ -259,8 +300,7 @@ def _fill_custom_comboboxes(page, answers: list[dict], results: list[dict], paus
                 continue
             combo.click()
             pause(0.2, 0.5)
-            options = page.query_selector_all('[role="option"]')
-            visible_options = [option for option in options if option.is_visible()]
+            visible_options = _visible_options(page)
             choice = None
             for option in visible_options:
                 text = _normalized(option.inner_text())
