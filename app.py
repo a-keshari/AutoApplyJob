@@ -257,9 +257,14 @@ def create_app() -> tuple[Flask, SocketIO]:
     flask_app = Flask(__name__)
     flask_app.config["SECRET_KEY"] = _get_or_create_secret_key()
 
+    local_origins = [
+        f"http://{host}:{port}"
+        for host in ("localhost", "127.0.0.1")
+        for port in range(5000, 5011)
+    ]
     sio = SocketIO(
         flask_app,
-        cors_allowed_origins=["http://localhost:*", "http://127.0.0.1:*"],
+        cors_allowed_origins=local_origins,
         async_mode="gevent",
     )
 

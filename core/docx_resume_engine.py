@@ -318,6 +318,16 @@ def _parse_llm_response(raw_response: str, editable: list[dict]) -> dict:
             f"LLM response does not cover every editable paragraph; missing={missing}, extra={extra}"
         )
 
+    editable_by_id = {entry["id"]: entry for entry in editable}
+    for edit_id, text in list(edit_map.items()):
+        entry = editable_by_id[edit_id]
+        if entry["kind"] != "certifications":
+            continue
+        original_items = Counter(_certification_items(entry["original"]))
+        generated_items = Counter(_certification_items(text))
+        if generated_items != original_items:
+            edit_map[edit_id] = entry["original"]
+
     normalized_terms: list[dict] = []
     for item in coverage_terms:
         if not isinstance(item, dict):
@@ -326,8 +336,8 @@ def _parse_llm_response(raw_response: str, editable: list[dict]) -> dict:
         term = item.get("term")
         jd_count = item.get("jd_count")
         target_count = item.get("target_count")
-        if group not in {"a", "b", "c", "d"} or not isinstance(term, str) or not term:
-            raise ResumeGenerationError("Coverage terms must use group a-d and a non-empty exact term")
+        if group not in {"a", "b", "c", "d", "e"} or not isinstance(term, str) or not term:
+            raise ResumeGenerationError("Coverage terms must use group a-e and a non-empty term")
         if not isinstance(jd_count, int) or jd_count < 0:
             raise ResumeGenerationError(f"Invalid jd_count for coverage term: {term}")
         if not isinstance(target_count, int) or target_count < 1:
@@ -402,6 +412,16 @@ def _validate_term_table(job_title: str, jd_text: str, coverage_terms: list[dict
     return errors
 
 
+def _set_deterministic_term_counts(
+    job_title: str, jd_text: str, coverage_terms: list[dict]
+) -> None:
+    """Replace model-reported occurrence counts with literal machine counts."""
+    for item in coverage_terms:
+        group = item["group"]
+        term = item["term"]
+        item["jd_count"] = job_title.count(term) if group == "a" else jd_text.count(term)
+
+
 def _validate_coverage(
     resume_text: str, coverage_terms: list[dict]
 ) -> tuple[list[str], list[dict]]:
@@ -412,9 +432,24 @@ def _validate_coverage(
         actual = resume_text.count(term)
         target = item["target_count"]
         report.append({**item, "resume_count": actual})
-        if actual < target:
+        if item["group"] != "e" and actual < target:
             errors.append(f"'{term}' appears {actual} time(s); target is {target}")
     return errors, report
+
+
+def _validate_edit_lengths(editable: list[dict], edit_map: dict[str, str]) -> list[str]:
+    """Reject expansion that is likely to move the resume's fixed page break."""
+    errors: list[str] = []
+    for entry in editable:
+        original_length = len(entry["original"])
+        generated_length = len(edit_map[entry["id"]])
+        maximum_length = max(original_length, int(original_length * 1.05))
+        if generated_length > maximum_length:
+            errors.append(
+                f"Paragraph {entry['id']} is {generated_length} characters; "
+                f"maximum is {maximum_length}. Shorten it by replacing wording"
+            )
+    return errors
 
 
 def _first_nonempty_line(page_text: str) -> str:
@@ -423,6 +458,27 @@ def _first_nonempty_line(page_text: str) -> str:
         if cleaned:
             return cleaned
     return ""
+
+
+def _preserve_page_two_opening_paragraph(
+    baseline_pdf: Path, editable: list[dict], edit_map: dict[str, str]
+) -> None:
+    """Keep the editable paragraph that begins page two byte-for-byte unchanged."""
+    try:
+        reader = PdfReader(str(baseline_pdf))
+    except Exception as exc:
+        logger.warning("Could not inspect the baseline PDF page break: %s", exc)
+        return
+    if len(reader.pages) < 2:
+        return
+    expected = _first_nonempty_line(reader.pages[1].extract_text() or "")
+    if not expected:
+        return
+    for entry in editable:
+        original = re.sub(r"\s+", " ", entry["original"]).strip()
+        if original.startswith(expected) or expected.startswith(original):
+            edit_map[entry["id"]] = entry["original"]
+            return
 
 
 def _validate_pdf_layout(master_pdf_path: Path, generated_pdf_path: Path) -> list[str]:
@@ -453,6 +509,21 @@ def convert_docx_to_pdf(docx_path: Path, pdf_path: Path) -> None:
         or shutil.which("soffice")
         or shutil.which("libreoffice")
     )
+
+    if not converter and os.name == "nt":
+        for candidate in (
+            Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
+            / "LibreOffice"
+            / "program"
+            / "soffice.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+            / "LibreOffice"
+            / "program"
+            / "soffice.exe",
+        ):
+            if candidate.is_file():
+                converter = str(candidate)
+                break
 
     if converter:
         with tempfile.TemporaryDirectory(prefix="autoapply-pdf-") as temp_dir:
@@ -543,10 +614,13 @@ change outside the listed editable paragraphs.
 Additional machine constraints:
 - Return exactly one edit for every editable paragraph ID, even if unchanged.
 - Do not add or remove paragraph IDs. Paragraph count and formatting are fixed.
+- Keep every replacement at or below the original paragraph's character count whenever
+  possible; never exceed it by more than 5%. Replace irrelevant wording to make room.
 - Job/company/title/date/client/education text is locked and cannot be changed.
 - Certifications may only be reordered; preserve each certification's exact wording.
-- Build the term table required by the instructions and return groups (a)-(d) as
-  coverage_terms using exact JD strings and exact case/punctuation.
+- Build the term table required by the instructions and return groups (a)-(e) as
+  coverage_terms. Use exact JD strings and exact case/punctuation for groups (a)-(d),
+  and standard industry wording for the predicted-skill terms in group (e).
 - For each coverage term, jd_count is its exact occurrence count in the job title
   for group (a), otherwise in the JD below.
 - target_count is the minimum exact occurrence count the final resume must contain.
@@ -607,7 +681,7 @@ def generate_docx_resume(
     output_dir: Path,
     applicant_name: str,
     llm_config: Any,
-    max_corrections: int = 1,
+    max_corrections: int = 3,
 ) -> tuple[Path, Path, dict]:
     """Generate a job-specific DOCX/PDF by editing only approved master paragraphs."""
     if master_docx_path.suffix.lower() != ".docx":
@@ -644,10 +718,28 @@ def generate_docx_resume(
                 current_prompt = _build_correction_prompt(prompt, previous_response, last_errors)
 
             previous_response = invoke_llm(current_prompt, llm_config)
-            parsed = _parse_llm_response(previous_response, editable)
+            try:
+                parsed = _parse_llm_response(previous_response, editable)
+            except ResumeGenerationError as exc:
+                last_errors = [str(exc)]
+                if attempt < max_corrections:
+                    continue
+                break
 
+            _set_deterministic_term_counts(
+                job_title, jd_text, parsed["coverage_terms"]
+            )
             term_table_errors = _validate_term_table(
                 job_title, jd_text, parsed["coverage_terms"]
+            )
+            length_errors = _validate_edit_lengths(editable, parsed["edit_map"])
+            if length_errors:
+                last_errors = term_table_errors + length_errors
+                if attempt < max_corrections:
+                    continue
+                break
+            _preserve_page_two_opening_paragraph(
+                baseline_pdf, editable, parsed["edit_map"]
             )
             _write_patched_docx(master_docx_path, output_docx_path, parsed["edit_map"])
             convert_docx_to_pdf(output_docx_path, output_pdf_path)
