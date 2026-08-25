@@ -443,7 +443,8 @@ def _validate_edit_lengths(editable: list[dict], edit_map: dict[str, str]) -> li
     for entry in editable:
         original_length = len(entry["original"])
         generated_length = len(edit_map[entry["id"]])
-        maximum_length = max(original_length, int(original_length * 1.05))
+        proportional_limit = (original_length * 105 + 99) // 100
+        maximum_length = max(original_length + 5, proportional_limit)
         if generated_length > maximum_length:
             errors.append(
                 f"Paragraph {entry['id']} is {generated_length} characters; "

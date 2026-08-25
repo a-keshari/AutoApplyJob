@@ -225,6 +225,14 @@ def test_edit_length_validation_rejects_paragraph_expansion() -> None:
     ]
 
 
+def test_edit_length_validation_allows_small_absolute_change_to_short_line() -> None:
+    editable = [{"id": "p1", "original": "A" * 15}]
+
+    errors = engine._validate_edit_lengths(editable, {"p1": "B" * 16})
+
+    assert errors == []
+
+
 def test_invalid_certification_rewrite_is_replaced_with_original(tmp_path: Path) -> None:
     resume = tmp_path / "resume.docx"
     _make_resume(resume)
