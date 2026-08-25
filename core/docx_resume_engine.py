@@ -437,22 +437,6 @@ def _validate_coverage(
     return errors, report
 
 
-def _validate_edit_lengths(editable: list[dict], edit_map: dict[str, str]) -> list[str]:
-    """Reject expansion that is likely to move the resume's fixed page break."""
-    errors: list[str] = []
-    for entry in editable:
-        original_length = len(entry["original"])
-        generated_length = len(edit_map[entry["id"]])
-        proportional_limit = (original_length * 105 + 99) // 100
-        maximum_length = max(original_length + 5, proportional_limit)
-        if generated_length > maximum_length:
-            errors.append(
-                f"Paragraph {entry['id']} is {generated_length} characters; "
-                f"maximum is {maximum_length}. Shorten it by replacing wording"
-            )
-    return errors
-
-
 def _first_nonempty_line(page_text: str) -> str:
     for line in page_text.splitlines():
         cleaned = re.sub(r"\s+", " ", line).strip()
@@ -733,12 +717,6 @@ def generate_docx_resume(
             term_table_errors = _validate_term_table(
                 job_title, jd_text, parsed["coverage_terms"]
             )
-            length_errors = _validate_edit_lengths(editable, parsed["edit_map"])
-            if length_errors:
-                last_errors = term_table_errors + length_errors
-                if attempt < max_corrections:
-                    continue
-                break
             _preserve_page_two_opening_paragraph(
                 baseline_pdf, editable, parsed["edit_map"]
             )

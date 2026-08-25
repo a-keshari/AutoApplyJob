@@ -214,25 +214,6 @@ def test_predicted_group_e_terms_are_reported_but_not_mandatory() -> None:
     assert report[0]["resume_count"] == 0
 
 
-def test_edit_length_validation_rejects_paragraph_expansion() -> None:
-    editable = [{"id": "p1", "original": "A" * 100}]
-
-    errors = engine._validate_edit_lengths(editable, {"p1": "B" * 106})
-
-    assert errors == [
-        "Paragraph p1 is 106 characters; maximum is 105. "
-        "Shorten it by replacing wording"
-    ]
-
-
-def test_edit_length_validation_allows_small_absolute_change_to_short_line() -> None:
-    editable = [{"id": "p1", "original": "A" * 15}]
-
-    errors = engine._validate_edit_lengths(editable, {"p1": "B" * 16})
-
-    assert errors == []
-
-
 def test_invalid_certification_rewrite_is_replaced_with_original(tmp_path: Path) -> None:
     resume = tmp_path / "resume.docx"
     _make_resume(resume)
